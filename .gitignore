@@ -1,0 +1,7 @@
+# Character sheets are personal data; they live in ~/.local/share/persona/
+*.cs.md
+*.cs.md.bak
+*.cs.md.tmp
+characters/
+__pycache__/
+*.pyc

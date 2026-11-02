@@ -1,0 +1,20 @@
+# Puts the text console on the 7" HDMI screen when it's plugged in, otherwise
+# on the 3.5" TFT, regardless of which display the kernel registers first.
+# Install:
+#   sudo cp deck/persona-console.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable persona-console.service
+# Edit the ExecStart path if the repo isn't at /home/jason/persona.
+
+[Unit]
+Description=Persona: put the text console on the right display
+After=systemd-modules-load.service
+Before=getty@tty1.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/jason/persona/persona.py --map-console --wait 15
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
