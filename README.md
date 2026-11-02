@@ -24,7 +24,7 @@ on a desktop, or on a Linux console.
 ```
 
 Options: `--theme green|amber|cyan`, `--ascii`, `--no-splash`, `--dir PATH`,
-`--hud [FB]`, `--hud-font PX`. Press `?` in the app for keys.
+`--hud [FB]`, `--hud-font PX`, `--cpx [DEV]`. Press `?` in the app for keys.
 
 Every change saves immediately; a `.bak` copy is made each time a sheet opens.
 `u` undoes, and `e` opens the whole sheet in `$EDITOR`.
@@ -45,7 +45,9 @@ A game system is a Markdown template, `<id>.cstpl.md`; a character is a
 filled-in copy of it, `<name>.cs.md`.
 
 ```
-<!-- persona: system="Name" id=abbr version=1 -->   template metadata
+<!-- persona: system="Name" id=abbr version=1 -->   template metadata, plus optional
+     hud-default=Section hud-default-leds=Section    HUD fallback without / with the CPX
+     hud-cyber="A,B" leds="Row,Row,Row,Table#1"     CPX cyber-mode HUD, LED tracks
 # [text]                                            character name
 ## Section                                          one screen (keys 1-9, 0)
 <!-- persona: hud=Other Section -->                 what the HUD shows here
@@ -71,6 +73,12 @@ time they're opened.
 - **Console placement:** `deck/persona-console.service` moves the text console
   to the HDMI screen when one is connected, otherwise to the TFT, regardless of
   which display registers first. Install instructions are in the file.
+- **Wound LEDs (Circuit Playground Express):** copy `cpx/boot.py`, `cpx/code.py`
+  and optionally `cpx/sounds/` to the board's CIRCUITPY drive, press RESET once,
+  and run Persona with `--cpx`. The ring shows two wound tracks (red/blue);
+  the slide switch flips to cyber mode (green/purple) and tells Persona, which
+  switches the HUD to `hud-cyber` sections. Button A plays a modem handshake,
+  button B a bark. Tracks come from `leds="..."` in the template header.
 - **Boot straight into the sheet:** enable console autologin, then in `~/.bashrc`:
 
   ```

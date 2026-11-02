@@ -1,4 +1,4 @@
-<!-- persona: system="Shadowrun Anarchy 2.0" id=sra2 version=1 -->
+<!-- persona: system="Shadowrun Anarchy 2.0" id=sra2 version=1 hud-default=Status hud-default-leds=Skills hud-cyber="Matrix,Rigging" leds="Physical,Mental,Matrix,Vehicles & Drones#1" -->
 # [text]
 
 ## Profile
@@ -45,6 +45,7 @@
 | Mental | [int] | [int] | [int] |
 
 ## Skills
+<!-- persona: hud=Status -->
 <!-- persona: repeat hudpool=Rating+Attr -->
 | Skill | Rating | Specialization | Attr |
 |---|---|---|---|

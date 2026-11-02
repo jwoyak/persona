@@ -379,6 +379,7 @@ class Schema:
                 break
         name = self.path.name
         stem = name[: -len(".cstpl.md")] if name.endswith(".cstpl.md") else self.path.stem
+        self.meta = meta
         self.id = meta.get("id") or stem
         self.system = meta.get("system") or self.id
         self.version = meta.get("version", "1")
@@ -720,6 +721,39 @@ class Sheet:
                             return None
         return None
 
+    def track(self, spec):
+        """Box marks for one LED slot as '110|0|0' (groups = box columns).
+        'Physical' = a table row labelled Physical; 'Vehicles & Drones#1' =
+        row 1 of the table under that heading."""
+        name, _, num = spec.partition("#")
+        name = name.strip().lower()
+        for sv in self.sections:
+            for cv in sv.ctxs:
+                for it in cv.items:
+                    if not isinstance(it, TableBind):
+                        continue
+                    if num.strip():
+                        if (cv.sub or sv.title).lower() == name:
+                            i = int(num) - 1
+                            return self._marks(it, i) if 0 <= i < len(it.rows) else None
+                        continue
+                    for i in range(len(it.rows)):
+                        if clean(it.cells(i)[0]).lower() == name:
+                            m = self._marks(it, i)
+                            if m:
+                                return m
+        return None
+
+    def _marks(self, t, i):
+        groups, cells = [], t.cells(i)
+        for j, ft in enumerate(t.types(i)):
+            if ft and ft.kind == "boxes":
+                v = clean(cells[j])
+                n = box_total(ft, v)
+                m = min(box_count(v), n)
+                groups.append("1" * m + "0" * (n - m))
+        return "|".join(groups) or None
+
     def pool(self, spec, t, i):
         """Sum of the named columns; a non-numeric cell (LOG) is looked up as an attribute."""
         hdr = [h.lower() for h in t.headers]
@@ -1050,6 +1084,18 @@ ASCII_MAP = str.maketrans({"›": ">", "‹": "<", "…": "~", "⏎": "Enter", "
                            "↑": "^", "↓": "v", "»": ">>", "▸": ">", "•": "*", "—": "-"})
 
 
+INPUT = {"timeout": -1}  # ms; becomes 100 when a CPX link needs polling
+
+
+def wait_key(scr):
+    """A blocking read that also works while the input timeout is set."""
+    while True:
+        try:
+            return scr.get_wch()
+        except curses.error:
+            continue
+
+
 def put(scr, y, x, s, attr=0):
     if ASCII["on"] and s:
         s = s.translate(ASCII_MAP).encode("ascii", "replace").decode("ascii")
@@ -1103,7 +1149,7 @@ def line_edit(scr, C, label, init="", redraw=None):
                         scr.get_wch()
                     except curses.error:
                         pass
-                    scr.nodelay(False)
+                    scr.timeout(INPUT["timeout"])
                 return None
             if ch in (curses.KEY_BACKSPACE, "\x7f", "\x08"):
                 if pos > 0:
@@ -1194,7 +1240,7 @@ def splash(scr, C, lines):
             time.sleep(0.08)
         time.sleep(0.35)
     finally:
-        scr.nodelay(False)
+        scr.timeout(INPUT["timeout"])
 
 
 class Row:
@@ -1234,19 +1280,39 @@ class App:
         self.undo = []
         self.rows = []
         self.hud = None
+        self.link = None
+        self.cyber = False
         self.rebuild()
 
     # --- HUD ------------------------------------------------------------
     def hud_model(self):
         """What the second display should show for the current section."""
         secs = self.sheet.sections
+        meta = self.sheet.schema.meta
         cur = secs[self.sec].title
         by = {s.title.lower(): s for s in secs}
-        target = by.get(self.sheet.schema.hud.get(cur.lower(), "").lower())
-        if target is None and cur.lower() != "status":
-            target = by.get("status")
-        if target is None:
-            target = secs[(self.sec + 1) % len(secs)]
+        linked = bool(self.link and self.link.connected)
+        if self.cyber and meta.get("hud-cyber"):
+            names = meta["hud-cyber"].split(",")
+        elif cur.lower() in self.sheet.schema.hud:
+            names = [self.sheet.schema.hud[cur.lower()]]
+        else:  # with LEDs showing wounds, default to the next most useful thing
+            names = [(linked and meta.get("hud-default-leds")) or meta.get("hud-default") or "Status"]
+        targets = [by[n.strip().lower()] for n in names if n.strip().lower() in by]
+        if not targets or (len(targets) == 1 and targets[0] is secs[self.sec] and not self.cyber):
+            alt = by.get("status")
+            targets = [alt if alt is not None and alt is not secs[self.sec]
+                       else secs[(self.sec + 1) % len(secs)]]
+        items = []
+        for tgt in targets:
+            if len(targets) > 1:
+                items.append(("head", tgt.title))
+            items.extend(self._hud_items(tgt))
+        items = [x for k, x in enumerate(items)  # drop headings with nothing under them
+                 if not (x[0] == "head" and (k + 1 == len(items) or items[k + 1][0] == "head"))]
+        return (self.sheet.name_ref.get(), " + ".join(t.title for t in targets), tuple(items))
+
+    def _hud_items(self, target):
         items = []
         for cv in target.ctxs:
             if cv.sub:
@@ -1276,9 +1342,34 @@ class App:
                     vals = tuple(v for v in (it.ref(i).get() for i in range(len(it.items))) if v)
                     if vals:
                         items.append(("list", vals))
-        items = [x for k, x in enumerate(items)  # drop headings with nothing under them
-                 if not (x[0] == "head" and (k + 1 == len(items) or items[k + 1][0] == "head"))]
-        return (self.sheet.name_ref.get(), target.title, tuple(items))
+        return items
+
+    def led_state(self):
+        slots = [s for s in self.sheet.schema.meta.get("leds", "").split(",") if s.strip()]
+        tracks = [(self.sheet.track(s) or "-") for s in slots[:4]]
+        return "W " + ";".join(tracks + ["-"] * (4 - len(tracks)))
+
+    def poll_link(self):
+        if not self.link:
+            return
+        import queue
+        while True:
+            try:
+                kind, val = self.link.events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "connect":
+                self.msg = (" CPX linked", self.C.acc)
+            elif kind == "disconnect":
+                self.cyber = False
+                self.msg = (" CPX unplugged", self.C.dim)
+            elif val == "SWITCH cyber":
+                self.cyber = True
+                self.msg = (" %s CYBER MODE" % self.g["up"], self.C.acc)
+            elif val == "SWITCH meat":
+                self.cyber = False
+                self.msg = (" %s MEAT MODE" % self.g["dn"], self.C.acc)
+        self.link.submit(self.led_state())
 
     def push_hud(self):
         if not self.hud:
@@ -1547,7 +1638,7 @@ class App:
             put(s, 2 + k, 20, what, C.norm)
         put(s, h - 1, 0, " any key to return", C.dim)
         s.refresh()
-        s.get_wch()
+        wait_key(s)
 
     # --- mutation -------------------------------------------------------
     def save(self, quiet=True):
@@ -1734,7 +1825,7 @@ class App:
             return
         self.msg = (" delete this %s? y/N" % ("row" if r.kind == "trow" else "item"), self.C.dmg)
         self.draw()
-        k = self.scr.get_wch()
+        k = wait_key(self.scr)
         self.msg = None
         if k in ("y", "Y"):
             self.mutate(lambda: r.obj.delete(r.i))
@@ -1800,7 +1891,7 @@ class App:
                 nxt = self.scr.get_wch()
             except curses.error:
                 nxt = None
-            self.scr.nodelay(False)
+            self.scr.timeout(INPUT["timeout"])
             if isinstance(nxt, str) and nxt.isdigit():
                 return "ALT" + nxt
             return "ESC"
@@ -1824,6 +1915,7 @@ class App:
     def run(self):
         K = curses
         while True:
+            self.poll_link()
             self.draw()
             self.push_hud()
             k = self.getkey()
@@ -2216,19 +2308,29 @@ class Hud:
 
     def _table(self, d, y, headers, rows):
         n = len(headers)
-        widths = [max([len(headers[j])] + [self._chars(r[j]) for r in rows]) for j in range(n)]
+        content = [max([1] + [self._chars(r[j]) for r in rows]) for j in range(n)]
+        widths = [max(len(headers[j]), content[j]) for j in range(n)]
         avail = self.cols - 1
-        while sum(widths) + 2 * (n - 1) > avail:
-            text_cols = [j for j in range(n) if widths[j] > 3 and all(r[j][0] != "b" for r in rows)]
+        gap = 2 if sum(widths) + 2 * (n - 1) <= avail else 1
+        # 1) shorten headers that are wider than their data ("Serious" over one box)
+        while sum(widths) + gap * (n - 1) > avail:
+            over = [j for j in range(n) if widths[j] > max(content[j], 2)]
+            if not over:
+                break
+            j = max(over, key=lambda k: widths[k] - content[k])
+            widths[j] -= 1
+        # 2) then squeeze the widest text column
+        while sum(widths) + gap * (n - 1) > avail:
+            text_cols = [j for j in range(n) if widths[j] > 4 and all(r[j][0] != "b" for r in rows)]
             if not text_cols:
                 break
             widths[max(text_cols, key=lambda j: widths[j])] -= 1
         xs, x = [], 4
         for w in widths:
             xs.append(x)
-            x += (w + 2) * self.cw
+            x += (w + gap) * self.cw
         for j in range(n):
-            self._t(d, xs[j], y, self._fit(headers[j], widths[j]), self.c["dim"])
+            self._t(d, xs[j], y, headers[j][:widths[j]], self.c["dim"])
         y += self.lh
         for r in rows:
             if y + self.lh > self.h:
@@ -2237,6 +2339,111 @@ class Hud:
                 self._val(d, xs[j], y, r[j], widths[j])
             y += self.lh
         return y
+
+
+# --------------------------------------------------------------------------
+# CPX link: wound LEDs, slide switch and buttons on a Circuit Playground Express
+# --------------------------------------------------------------------------
+class CpxLink:
+    """Talks to persona_cpx's code.py over the board's USB data port. Runs in a
+    background thread, reconnects on its own, and never blocks the sheet."""
+
+    def __init__(self, spec):
+        import queue
+        import threading
+        self.spec = spec
+        self.fd = None
+        self.device = None
+        self.connected = False
+        self.events = queue.Queue()
+        self.lock = threading.Lock()
+        self.state = self.sent = None
+        self.stop = False
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def find(self):
+        if self.spec not in (None, "", "auto"):
+            return self.spec if os.path.exists(self.spec) else None
+        import glob
+        for pat in ("/dev/serial/by-id/*ircuit*if02", "/dev/serial/by-id/*Adafruit*if02"):
+            hits = sorted(glob.glob(pat))
+            if hits:
+                return hits[0]
+        return None
+
+    def _open(self, path):
+        import tty
+        fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            tty.setraw(fd)
+        except Exception:  # noqa: BLE001 - not every device is a tty
+            pass
+        return fd
+
+    def _send(self, text):
+        try:
+            os.write(self.fd, text.encode("utf-8") + b"\n")
+        except BlockingIOError:
+            pass  # board isn't reading right now; the next update resends
+
+    def _close(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.fd, self.connected, self.sent = None, False, None
+
+    def _loop(self):
+        import select
+        buf = b""
+        while not self.stop:
+            if self.fd is None:
+                path = self.find()
+                if path:
+                    try:
+                        self.fd = self._open(path)
+                        self.device, self.connected, buf = path, True, b""
+                        self._send("HELLO")
+                        self.events.put(("connect", path))
+                    except OSError:
+                        self._close()
+                if self.fd is None:
+                    time.sleep(1.0)
+                    continue
+            try:
+                with self.lock:
+                    st = self.state
+                if st is not None and st != self.sent:
+                    self._send(st)
+                    self.sent = st
+                ready, _, _ = select.select([self.fd], [], [], 0.1)
+                if ready:
+                    data = os.read(self.fd, 256)
+                    if not data:
+                        raise OSError("device closed")
+                    buf += data
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        line = line.strip().decode("utf-8", "replace")
+                        if line:
+                            self.events.put(("line", line))
+            except OSError:
+                self._close()
+                self.events.put(("disconnect", None))
+                time.sleep(1.0)
+
+    def submit(self, state):
+        with self.lock:
+            self.state = state
+
+    def close(self):
+        self.stop = True
+        self.thread.join(timeout=2)
+        if self.fd is not None:
+            self._send("BYE")
+            self._close()
 
 
 # --------------------------------------------------------------------------
@@ -2303,11 +2510,17 @@ def run_curses(scr, args, home, templates, schema, charpath, ascii_mode):
         except Exception as e:  # noqa: BLE001
             app.msg = (" HUD off: %s" % e, C.dmg)
     app.hud = hud
+    if args.cpx:
+        app.link = CpxLink(args.cpx)
+        INPUT["timeout"] = 100
+        scr.timeout(100)
     try:
         app.run()
     finally:
         if hud:
             hud.close()
+        if app.link:
+            app.link.close()
     return "saved: %s" % charpath
 
 
@@ -2326,6 +2539,9 @@ def main(argv=None):
     ap.add_argument("--hud", nargs="?", const="auto", metavar="FB",
                     help="live summary on a second display (default: the SPI TFT; or /dev/fbN)")
     ap.add_argument("--hud-font", type=int, default=15, metavar="PX", help="HUD font size")
+    ap.add_argument("--cpx", nargs="?", const="auto", metavar="DEV",
+                    help="wound LEDs + mode switch on a Circuit Playground Express "
+                         "(default: auto-detect; or /dev/ttyACMn)")
     ap.add_argument("--map-console", nargs="?", const="auto", metavar="FB",
                     help="(root) move text consoles to a display and exit; auto = HDMI if "
                          "connected, else the TFT")
